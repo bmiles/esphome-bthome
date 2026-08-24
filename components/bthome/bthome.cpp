@@ -5,6 +5,7 @@
 
 #if defined(USE_ESP32) || defined(USE_NRF52)
 
+#include <algorithm>
 #include <cstring>
 #include <cmath>
 
@@ -624,8 +625,13 @@ void BTHome::start_advertising_() {
   this->ad_[1].data_len = this->adv_data_len_ - 3;  // Skip flags
   this->ad_[1].data = this->adv_data_ + 4;          // Skip flags + length + type
 
-  // Set up scan response data
+  // Set up scan response data. Legacy scan responses are limited to 31 bytes
+  // and Zephyr rejects oversized data (it does not truncate), so track the
+  // serialized size (2 header bytes + payload per entry), clip the name to the
+  // remaining space and skip trailing entries that would overflow.
   size_t sd_count = 0;
+  size_t sd_used = 0;
+  const size_t sd_max = 31;
 
   // Add BTHome service UUID to scan response
   static uint8_t svc_uuid_data[] = {BTHOME_SERVICE_UUID & 0xFF, (BTHOME_SERVICE_UUID >> 8) & 0xFF};
@@ -633,6 +639,7 @@ void BTHome::start_advertising_() {
   this->sd_[sd_count].data_len = sizeof(svc_uuid_data);
   this->sd_[sd_count].data = svc_uuid_data;
   sd_count++;
+  sd_used += 2 + sizeof(svc_uuid_data);
 
   // Add TX Power Level
   static int8_t tx_power_data;
@@ -641,6 +648,7 @@ void BTHome::start_advertising_() {
   this->sd_[sd_count].data_len = sizeof(tx_power_data);
   this->sd_[sd_count].data = reinterpret_cast<const uint8_t *>(&tx_power_data);
   sd_count++;
+  sd_used += 2 + sizeof(tx_power_data);
 
   // Add Appearance (Generic Sensor = 0x0540)
   static uint8_t appearance_data[] = {0x40, 0x05};  // Little-endian 0x0540
@@ -648,15 +656,20 @@ void BTHome::start_advertising_() {
   this->sd_[sd_count].data_len = sizeof(appearance_data);
   this->sd_[sd_count].data = appearance_data;
   sd_count++;
+  sd_used += 2 + sizeof(appearance_data);
 
-  if (!this->device_name_.empty()) {
-    this->sd_[sd_count].type = BT_DATA_NAME_COMPLETE;
-    this->sd_[sd_count].data_len = this->device_name_.length();
+  if (!this->device_name_.empty() && sd_used + 2 < sd_max) {
+    size_t name_len = std::min(this->device_name_.length(), sd_max - sd_used - 2);
+    // Shortened Local Name (0x08) if clipped, Complete (0x09) otherwise
+    this->sd_[sd_count].type =
+        (name_len < this->device_name_.length()) ? BT_DATA_NAME_SHORTENED : BT_DATA_NAME_COMPLETE;
+    this->sd_[sd_count].data_len = name_len;
     this->sd_[sd_count].data = reinterpret_cast<const uint8_t *>(this->device_name_.c_str());
     sd_count++;
+    sd_used += 2 + name_len;
   }
 
-  if (this->has_manufacturer_id_) {
+  if (this->has_manufacturer_id_ && sd_used + 2 + 6 <= sd_max) {
     // Manufacturer ID (2 bytes) + ESPHome version code (4 bytes)
     static uint8_t mfr_data[6];
     mfr_data[0] = this->manufacturer_id_ & 0xFF;
@@ -670,6 +683,7 @@ void BTHome::start_advertising_() {
     this->sd_[sd_count].data_len = sizeof(mfr_data);
     this->sd_[sd_count].data = mfr_data;
     sd_count++;
+    sd_used += 2 + sizeof(mfr_data);
   }
 
   int err = bt_le_adv_start(&this->adv_param_, this->ad_, 2,
