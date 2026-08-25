@@ -620,10 +620,13 @@ void BTHome::start_advertising_() {
   this->ad_[0].data_len = sizeof(flags_data);
   this->ad_[0].data = flags_data;
 
-  // Service data (skip flags we already added)
+  // Service data. adv_data_ holds serialized AD structures:
+  // [flags: len,type,val (3B)][svc data: len,type (2B)][UUID16 + BTHome payload].
+  // Zephyr's bt_data wants only the AD payload (UUID16 + BTHome payload), so
+  // skip the 3-byte flags AD plus this AD's own length and type bytes (5 total).
   this->ad_[1].type = BT_DATA_SVC_DATA16;
-  this->ad_[1].data_len = this->adv_data_len_ - 3;  // Skip flags
-  this->ad_[1].data = this->adv_data_ + 4;          // Skip flags + length + type
+  this->ad_[1].data_len = this->adv_data_len_ - 5;
+  this->ad_[1].data = this->adv_data_ + 5;
 
   // Set up scan response data. Legacy scan responses are limited to 31 bytes
   // and Zephyr rejects oversized data (it does not truncate), so track the
